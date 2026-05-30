@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  # LGTM Stack
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./lgtm/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - lgtm
+
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./lgtm/loki-config.yml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - lgtm
+
+  tempo:
+    image: grafana/tempo:latest
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./lgtm/tempo-config.yml:/etc/tempo-config.yml
+      - tempo_data:/var/tempo
+    command: -config.file=/etc/tempo-config.yml
+    networks:
+      - lgtm
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - lgtm
+
+  # Application Services
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3000"
+    env_file:
+      - ./api/.env
+    depends_on:
+      - tempo
+      - loki
+    networks:
+      - lgtm
+    restart: unless-stopped
+
+  handler:
+    build:
+      context: ./handler
+      dockerfile: Dockerfile
+    env_file:
+      - ./handler/.env
+    depends_on:
+      - tempo
+      - loki
+    networks:
+      - lgtm
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  loki_data:
+  tempo_data:
+  grafana_data:
+
+networks:
+  lgtm:
+    driver: bridge
