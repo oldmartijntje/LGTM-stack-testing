@@ -15,7 +15,6 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --only=production
 
-COPY .env ./.env
 COPY --from=builder /app/dist ./dist
 
 CMD ["npm", "start"]
