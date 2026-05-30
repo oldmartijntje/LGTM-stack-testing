@@ -1,18 +1,18 @@
 server:
   http_listen_port: 3200
+  grpc_listen_port: 4317
 
 distributor:
-  rate_limit_enabled: false
-
-ingester:
-  max_block_duration: 5m
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
 
 storage:
   trace:
     backend: local
     local:
       path: /var/tempo/traces
-
-querier:
-  frontend_worker:
-    frontend_address: localhost:3200
