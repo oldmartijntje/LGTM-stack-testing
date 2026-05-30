@@ -46,6 +46,14 @@ curl -X POST http://localhost:3001/send \
 open http://localhost:3000  # admin/admin
 ```
 
+## Observability & Dashboards
+
+See [GRAFANA_SETUP_GUIDE.md](GRAFANA_SETUP_GUIDE.md) for comprehensive instructions on:
+- Adding **Prometheus**, **Loki**, and **Tempo** data sources to Grafana
+- Creating dashboards to visualize metrics, logs, and traces from your services
+- Understanding what telemetry your application sends
+- Example queries for common troubleshooting scenarios
+
 ## Services
 
 | Service | Port | Purpose |
