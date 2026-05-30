@@ -1,0 +1,20 @@
+info:
+  name: Sending Test
+  type: http
+
+http:
+  method: POST
+  url: http://localhost:3003/send
+  body:
+    type: json
+    data: |-
+      {
+        "message": "your message content"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
