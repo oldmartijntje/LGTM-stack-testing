@@ -30,15 +30,31 @@ app.use(pino());
 let mqttClient;
 let mqttReady = false;
 
-function connectMqtt() {
-    const brokerUrl = `${process.env.MQTT_BROKER_URL}:${process.env.MQTT_BROKER_PORT}`;
-
-    mqttClient = mqtt.connect(brokerUrl, {
+function buildMqttOptions() {
+    const options = {
         clientId: process.env.MQTT_CLIENT_ID,
         clean: true,
         connectTimeout: parseInt(process.env.MQTT_CONNECT_TIMEOUT),
         reconnectPeriod: parseInt(process.env.MQTT_RECONNECT_PERIOD),
-    });
+    };
+
+    // Add authentication if credentials are provided
+    if (process.env.MQTT_USERNAME && process.env.MQTT_PASSWORD) {
+        options.username = process.env.MQTT_USERNAME;
+        options.password = process.env.MQTT_PASSWORD;
+        console.log('MQTT: Using authentication');
+    } else {
+        console.log('MQTT: Connecting without authentication');
+    }
+
+    return options;
+}
+
+function connectMqtt() {
+    const brokerUrl = `${process.env.MQTT_BROKER_URL}:${process.env.MQTT_BROKER_PORT}`;
+    const mqttOptions = buildMqttOptions();
+
+    mqttClient = mqtt.connect(brokerUrl, mqttOptions);
 
     mqttClient.on('connect', () => {
         mqttReady = true;
