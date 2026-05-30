@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  # LGTM Stack
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "${PROMETHEUS_PORT}:9090"
+    volumes:
+      - ./lgtm/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - lgtm
+    restart: always
+
+  loki:
+    image: grafana/loki:latest
+    volumes:
+      - ./lgtm/loki-config.yml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - lgtm
+    restart: always
+
+  tempo:
+    image: grafana/tempo:latest
+    ports:
+      - "4318:4318"
+    volumes:
+      - ./lgtm/tempo-config.yml:/etc/tempo-config.yml
+      - tempo_data:/var/tempo
+    command: -config.file=/etc/tempo-config.yml
+    networks:
+      - lgtm
+    restart: always
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - lgtm
+    restart: always
+
+  # Application Services
+  api:
+    image: ${API_IMAGE}
+    ports:
+      - "${API_PORT}:3000"
+    environment:
+      PORT: 3000
+      MQTT_BROKER_URL: ${MQTT_BROKER_URL}
+      MQTT_BROKER_PORT: ${MQTT_BROKER_PORT}
+      MQTT_CLIENT_ID: mqtt-api
+      MQTT_USERNAME: ${MQTT_USERNAME}
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
+      MQTT_CONNECT_TIMEOUT: 5000
+      MQTT_RECONNECT_PERIOD: 5000
+      MQTT_REQUEST_TOPIC: handler/request
+      MQTT_RESPONSE_TOPIC: handler/response
+      TEMPO_ENDPOINT: http://tempo:4318/v1/traces
+      PROMETHEUS_ENDPOINT: http://prometheus:4318/v1/metrics
+    depends_on:
+      - tempo
+      - loki
+    networks:
+      - lgtm
+    restart: always
+
+  handler:
+    image: ${HANDLER_IMAGE}
+    environment:
+      MQTT_BROKER_URL: ${MQTT_BROKER_URL}
+      MQTT_BROKER_PORT: ${MQTT_BROKER_PORT}
+      MQTT_CLIENT_ID: mqtt-handler
+      MQTT_USERNAME: ${MQTT_USERNAME}
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
+      MQTT_CONNECT_TIMEOUT: 5000
+      MQTT_RECONNECT_PERIOD: 5000
+      MQTT_REQUEST_TOPIC: handler/request
+      MQTT_RESPONSE_TOPIC: handler/response
+      TEMPO_ENDPOINT: http://tempo:4318/v1/traces
+      PROMETHEUS_ENDPOINT: http://prometheus:4318/v1/metrics
+    depends_on:
+      - tempo
+      - loki
+    networks:
+      - lgtm
+    restart: always
+
+volumes:
+  prometheus_data:
+  loki_data:
+  tempo_data:
+  grafana_data:
+
+networks:
+  lgtm:
+    driver: bridge
