@@ -2,22 +2,17 @@ import 'dotenv/config';
 import express from 'express';
 import mqtt from 'mqtt';
 import pino from 'pino-http';
+import promClient from 'prom-client';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
-import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
-import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 
 process.env.OTEL_SERVICE_NAME = 'mqtt-api';
 
+// Only enable tracing, not metrics (use prom-client for metrics instead)
 const sdk = new NodeSDK({
     traceExporter: new OTLPTraceExporter({
         url: process.env.TEMPO_ENDPOINT,
-    }),
-    metricReader: new PeriodicExportingMetricReader({
-        exporter: new OTLPMetricExporter({
-            url: process.env.PROMETHEUS_ENDPOINT,
-        }),
     }),
     instrumentations: [getNodeAutoInstrumentations()],
 });
@@ -26,6 +21,28 @@ sdk.start();
 
 const app = express();
 app.use(pino());
+
+// Prometheus metrics middleware
+const register = promClient.register;
+const defaultMetrics = promClient.collectDefaultMetrics;
+defaultMetrics({ register });
+
+// HTTP request duration histogram
+const httpDuration = new promClient.Histogram({
+    name: 'http_request_duration_ms',
+    help: 'Duration of HTTP requests in ms',
+    labelNames: ['method', 'route', 'status_code'],
+    registers: [register],
+});
+
+app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+        const duration = Date.now() - start;
+        httpDuration.labels(req.method, req.route?.path || req.path, res.statusCode).observe(duration);
+    });
+    next();
+});
 
 let mqttClient;
 let mqttReady = false;
@@ -85,6 +102,11 @@ function connectMqtt() {
 
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', service: 'mqtt-api', mqttReady });
+});
+
+app.get('/metrics', async (req, res) => {
+    res.set('Content-Type', promClient.register.contentType);
+    res.end(await promClient.register.metrics());
 });
 
 app.post('/send', express.json(), (req, res) => {

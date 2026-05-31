@@ -6,13 +6,15 @@ This guide walks you through setting up Grafana data sources and dashboards to v
 
 Your application sends observability data through:
 
-- **Metrics** (Prometheus): HTTP requests, MQTT connections, message processing rates
-- **Logs** (Loki): Connection events, message handling, errors, MQTT subscription confirmations
+- **Metrics** (Prometheus): Process-level metrics (memory, CPU, file descriptors) + Prometheus internal metrics. *Note: Application metrics require adding a `/metrics` endpoint*
+- **Logs** (Loki): HTTP requests (via pino-http), MQTT connection events, message handling, errors, and processing logs
 - **Traces** (Tempo): Distributed request flows between API and Handler via MQTT
 
 Services:
-- **mqtt-api**: Express API service that publishes messages to MQTT broker
-- **mqtt-handler**: MQTT message handler that processes requests and sends responses
+- **mqtt-api**: Express API service that publishes messages to MQTT broker (uses pino-http for HTTP logging)
+- **mqtt-handler**: MQTT message handler that processes requests and sends responses (uses pino structured logging)
+
+**⚠️ Metrics Status**: Your services have OpenTelemetry instrumentation AND Prometheus `/metrics` endpoints. Just rebuild and restart the services to enable application metrics (HTTP request latency, heap size, etc.).
 
 ---
 
@@ -33,12 +35,23 @@ Services:
    - **Access**: `Server (default)`
 5. Click **Save & Test** (you should see "Data source is working")
 
-**What you'll query**:
-- `http_server_request_duration_seconds` - API request latency
-- `http_server_requests_total` - Total HTTP requests
-- `mqtt_publish_sent_total` - MQTT messages published
-- `mqtt_subscribe_sent_total` - MQTT subscriptions
-- Node.js metrics: memory, CPU, event loop lag
+**What you'll query** (Currently Available):
+- `up` - Service availability (1 = up, 0 = down) for api and handler
+- `process_resident_memory_bytes` - Memory usage for each service
+- `process_cpu_seconds_total` - CPU time consumed
+- `prometheus_http_request_duration_seconds` - Prometheus internal request latency
+
+**To Enable Application Metrics** (HTTP latency, heap size, event loop lag):
+1. Rebuild services: `docker compose down && docker compose up --build`
+2. Send a test request:
+```bash
+curl -X POST http://localhost:3003/send \
+  -H "Content-Type: application/json" \
+  -d '{"message": "test"}'
+```
+3. Check metrics appear: `curl http://localhost:3000/metrics | head -20`
+
+The services now have `/metrics` endpoints configured and Prometheus is set to scrape them.
 
 ### Add Loki Data Source
 
@@ -52,10 +65,10 @@ Services:
 5. Click **Save & Test**
 
 **What you'll query**:
-- Logs from both `mqtt-api` and `mqtt-handler` services
-- Error messages from MQTT operations
-- Connection and subscription confirmations
-- Message processing logs
+- **API logs** (via pino-http): HTTP requests, responses, latency
+- **Handler logs** (via pino): MQTT connection events, message received, response publishing, errors
+- Error messages from MQTT connection failures and message parsing
+- Message processing logs with payloads and timestamps
 
 ### Add Tempo Data Source
 
@@ -83,65 +96,70 @@ Services:
 1. Click **Dashboards** → **New Dashboard**
 2. Click **Add Panel**
 
-#### Panel 1: API Request Rate
-- **Title**: API Request Rate
+#### Panel 1: Service Availability
+- **Title**: Service Status
 - **Data Source**: Prometheus
 - **Query**:
   ```
-  rate(http_server_requests_total{service_name="mqtt-api"}[1m])
+  up{job=~"api|handler"}
   ```
 - **Visualization**: Graph
-- **Description**: Shows requests per second to your API
+- **Description**: Shows which services are up (1) or down (0)
 
 #### Panel 2: API Request Duration (P95)
-- **Title**: API Request Duration (P95)
+- **Title**: API Request Latency (P95)
 - **Data Source**: Prometheus
 - **Query**:
   ```
-  histogram_quantile(0.95, rate(http_server_request_duration_seconds_bucket{service_name="mqtt-api"}[5m]))
+  histogram_quantile(0.95, rate(http_request_duration_ms_bucket{job="api"}[5m]))
   ```
 - **Visualization**: Graph
-- **Unit**: seconds
+- **Unit**: ms
+- **Description**: 95th percentile HTTP request latency
 
-#### Panel 3: MQTT Messages Published
-- **Title**: MQTT Messages Published
+#### Panel 3: API Request Duration (P99)
+- **Title**: API Request Latency (P99)
 - **Data Source**: Prometheus
 - **Query**:
   ```
-  rate(mqtt_publish_sent_total[1m])
+  histogram_quantile(0.99, rate(http_request_duration_ms_bucket{job="api"}[5m]))
   ```
 - **Visualization**: Graph
-- **Description**: Messages published to MQTT broker per second
+- **Unit**: ms
+- **Description**: 99th percentile HTTP request latency
 
-#### Panel 4: MQTT Connection Status
-- **Title**: MQTT Connection Status
+#### Panel 4: Memory Usage (RSS)
+- **Title**: Process Memory (RSS)
 - **Data Source**: Prometheus
 - **Query**:
   ```
-  mqtt_client_connected{service_name=~"mqtt-api|mqtt-handler"}
-  ```
-- **Visualization**: Stat
-- **Unit**: short
-- **Description**: 1 = connected, 0 = disconnected
-
-#### Panel 5: Node.js Memory Usage
-- **Title**: Memory Usage
-- **Data Source**: Prometheus
-- **Query**:
-  ```
-  nodejs_heap_size_used_bytes{service_name=~"mqtt-api|mqtt-handler"}
+  process_resident_memory_bytes{job=~"api|handler"}
   ```
 - **Visualization**: Graph
 - **Unit**: bytes
+- **Description**: Total resident set size memory for each service
 
-#### Panel 6: HTTP Error Rate
-- **Title**: API Error Rate (5xx errors)
+#### Panel 5: CPU Usage
+- **Title**: CPU Usage
 - **Data Source**: Prometheus
 - **Query**:
   ```
-  rate(http_server_requests_total{service_name="mqtt-api", status=~"5.."}[1m])
+  rate(process_cpu_seconds_total{job=~"api|handler"}[1m])
   ```
 - **Visualization**: Graph
+- **Unit**: percentunit
+- **Description**: CPU time consumption per service
+
+#### Panel 6: Heap Memory
+- **Title**: Heap Memory Usage
+- **Data Source**: Prometheus
+- **Query**:
+  ```
+  nodejs_heap_size_used_bytes{job=~"api|handler"}
+  ```
+- **Visualization**: Graph
+- **Unit**: bytes
+- **Description**: Active heap memory for each service
 
 **Save this dashboard as**: "LGTM - Metrics Overview"
 
@@ -150,52 +168,54 @@ Services:
 ### Dashboard 2: Logs Explorer (Loki)
 
 1. Click **Dashboards** → **New Dashboard**
-2. Click **Add Panel**
-
-#### Panel 1: Recent Logs
-- **Title**: Application Logs (All Services)
+2. Click **AddHTTP Request Logs (API)
+- **Title**: API Request Logs
 - **Data Source**: Loki
 - **Query**:
   ```
-  {job=~"mqtt-api|mqtt-handler"}
+  {job="mqtt-api"}
   ```
 - **Visualization**: Logs
-- **Description**: Shows all application logs in real-time
+- **Description**: HTTP requests logged by pino-http middleware
 
-#### Panel 2: Error Logs Only
+#### Panel 2: Handler Activity Logs
+- **Title**: Handler Processing Logs
+- **Data Source**: Loki
+- **Query**:
+  ```
+  {job="mqtt-handler"}
+  ```
+- **Visualization**: Logs
+- **Description**: Message received, response publishing, and handler events
+
+#### Panel 3: Error Logs Only
 - **Title**: Error Messages
 - **Data Source**: Loki
 - **Query**:
   ```
-  {job=~"mqtt-api|mqtt-handler"} |= "error" or "Error" or "ERROR"
+  {job=~"mqtt-api|mqtt-handler"} | json | level="error"
   ```
 - **Visualization**: Logs
 - **Color Log Levels**: Enabled
 
-#### Panel 3: MQTT Connection Events
+#### Panel 4: MQTT Connection Events
 - **Title**: MQTT Connection Events
 - **Data Source**: Loki
 - **Query**:
   ```
-  {job=~"mqtt-api|mqtt-handler"} |= "Connected" or "Disconnected" or "MQTT"
+  {job=~"mqtt-api|mqtt-handler"} |= "Connected" or "Disconnected" or "Failed to subscribe"
   ```
 - **Visualization**: Logs
 
-#### Panel 4: Message Processing Activity
-- **Title**: Message Processing Logs
+#### Panel 5: Message Payload Logs
+- **Title**: Message Details
 - **Data Source**: Loki
 - **Query**:
   ```
   {job="mqtt-handler"} |= "Message received" or "Publishing response"
   ```
 - **Visualization**: Logs
-
-#### Panel 5: API Request Logs
-- **Title**: API Request Logs
-- **Data Source**: Loki
-- **Query**:
-  ```
-  {job="mqtt-api"} 
+- **Description**: Detailed message payloads and processing
   ```
 - **Visualization**: Logs
 
@@ -237,80 +257,240 @@ Services:
 
 ---
 
-## Part 3: Understanding the Data Flow
+## Part 3A: Available Metrics Reference
+
+**Available Metrics** (after rebuild):
+
+The services are already configured with `prom-client` and `/metrics` endpoints:
+- **API**: Exposes `/metrics` on port 3000
+- **Handler**: Exposes `/metrics` on port 3001
+- **Prometheus**: Configured to scrape both endpoints
+
+### HTTP Metrics (Express/Node.js auto-instrumented)
+- **`http_server_duration_seconds`** - Request duration in seconds (histogram with _bucket, _count, _sum suffixes)
+  - Query: `histogram_quantile(0.95, rate(http_server_duration_seconds_bucket[5m]))`
+  - Use for: Request latency analysis, percentiles, performance SLOs
+- **`http_server_request_body_size_bytes`** - Request body size in bytes
+- **`http_server_response_body_size_bytes`** - Response body size in bytes
+
+### Node.js Runtime Metrics
+- **`nodejs_heap_size_used_bytes`** - Heap memory in use
+- **`nodejs_heap_size_limit_bytes`** - Maximum heap size
+- **`nodejs_external_memory_bytes`** - External memory
+- **`nodejs_gc_duration_seconds`** - Garbage collection duration (histogram)
+- **`nodejs_eventloop_lag_seconds`** - Event loop lag (histogram)
+  - High values indicate blocking operations
+
+### Process Metrics (from all services)
+- **`process_resident_memory_bytes`** - RSS memory (total process memory)
+- **`process_virtual_memory_bytes`** - Virtual memory
+- **`process_cpu_seconds_total`** - CPU time consumed
+  - Query: `rate(process_cpu_seconds_total[1m])` for CPU usage %
+- **`process_open_fds`** - Open file descriptors
+- **`process_max_fds`** - Maximum file descriptors
+- **`up`** - Service availability (1 = up, 0 = down)
+
+### Prometheus Internal Metrics
+- **`prometheus_http_request_duration_seconds`** - Prometheus API request latency (histogram)
+- **`prometheus_http_requests_total`** - Total HTTP requests to Prometheus
+- **`prometheus_config_last_reload_successful`** - Config reload status
+
+---
+
+**To Get Application Metrics**:
+
+Just rebuild and start the services:
+
+```bash
+docker compose down
+docker compose up --build
+```
+
+Then send a test request to generate metrics:
+
+```bash
+curl -X POST http://localhost:3003/send \
+  -H "Content-Type: application/json" \
+  -d '{"message": "test"}'
+```
+
+Verify metrics are available:
+
+```bash
+# API metrics
+curl http://localhost:3000/metrics 2>/dev/null | head -20
+
+# Handler metrics  
+curl http://localhost:3001/metrics 2>/dev/null | head -20
+```
+
+You should see output like:
+
+```
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes{job="api"} 123456789
+...
+# HELP http_server_duration_seconds HTTP request duration in seconds
+# TYPE http_server_duration_seconds histogram
+http_server_duration_seconds_bucket{job="api",le="0.005"} 0
+...
+```
+
+After these steps, you'll have access to:
+
+### HTTP Metrics (once /metrics endpoint added)
+- **`http_server_duration_seconds`** - Request duration in seconds (histogram with _bucket, _count, _sum suffixes)
+  - Query: `histogram_quantile(0.95, rate(http_server_duration_seconds_bucket[5m]))`
+  - Use for: Request latency analysis, percentiles, performance SLOs
+- **`http_server_request_body_size_bytes`** - Request body size in bytes
+- **`http_server_response_body_size_bytes`** - Response body size in bytes
+
+### Node.js Runtime Metrics (once /metrics endpoint added)
+- **`nodejs_heap_size_used_bytes`** - Heap memory in use
+- **`nodejs_heap_size_limit_bytes`** - Maximum heap size
+- **`nodejs_external_memory_bytes`** - External memory
+- **`nodejs_gc_duration_seconds`** - Garbage collection duration (histogram)
+- **`nodejs_eventloop_lag_seconds`** - Event loop lag (histogram)
+  - High values indicate blocking operations
+
+**Note**: These metrics appear with labels like `job`, `instance` once the `/metrics` endpoint is in place.
+
+---
 
 ### Example: User Sends a Message via API
 
-**What happens**:
-1. **Log** (Loki): `POST /send` request logged by pino-http middleware
-2. **Trace** (Tempo): Span created for incoming HTTP request
-3. **Metric** (Prometheus): `http_server_requests_total` incremented
-4. **Log** (Loki): "Sending message to handler: {message}" logged
-5. **Metric** (Prometheus): `mqtt_publish_sent_total` incremented
-6. **Trace** (Tempo): MQTT publish operation traced
-7. Handler receives message:
-   - **Log** (Loki): "Message received from API" with topic and payload
-   - **Trace** (Tempo): Span created for message processing
-   - **Metric** (Prometheus): Message processing metrics
-8. Handler publishes response:
-   - **Metric** (Prometheus): `mqtt_publish_sent_total` again
-   - **Log** (Loki): "Publishing response" logged
-9. API receives response:
-   - **Trace** (Tempo): Trace completed, showing full latency
-   - **Metric** (Prometheus): Request duration recorded in histogram
-   - **Log** (Loki): Response logged (if instrumented)
+**What happens and where it appears** (with current setup):
+
+1. **API receives POST /send request**:
+   - **Log** (Loki): pino-http logs the incoming HTTP request with method, URL, headers
+   - **Trace** (Tempo): Span created for incoming HTTP request
+   - **Metric** (Prometheus): `up{job="api"}` = 1 (service is responding)
+
+2. **API publishes to MQTT**:
+   - **Log** (Loki): "Sending message to handler: {message}" logged
+   - **Trace** (Tempo): MQTT publish operation captured by OpenTelemetry
+   - **Metric** (Prometheus): `process_resident_memory_bytes` may increase slightly
+
+3. **Handler receives MQTT message**:
+   - **Log** (Loki): pino logger logs "Message received from API" with topic and payload as JSON
+   - **Trace** (Tempo): Span created for message handling
+   - **Metric** (Prometheus): `process_cpu_seconds_total` increases, process metrics update
+
+4. **Handler publishes response**:
+   - **Log** (Loki): pino logger logs "Publishing response" with response object as JSON
+   - **Metric** (Prometheus): `process_resident_memory_bytes` may change
+   - **Trace** (Tempo): MQTT publish span
+
+5. **Traces complete**:
+   - **Trace** (Tempo): End-to-end trace shows HTTP request → MQTT publish → Handler processing → MQTT response
+   - Shows latency breakdown for each operation
+   - **Metric** (Prometheus): Process metrics (CPU, memory) recorded for both services
+
+**To see HTTP request latency and detailed application metrics**: Add `/metrics` endpoint following the "To Enable Application Metrics" section above.
 
 ### To Trace a Complete Request in Tempo:
 1. Go to **Explore** → Select **Tempo** data source
 2. Switch to **TraceQL** tab
-3. Search: `{ service.name = "mqtt-api" }`
-4. Click a trace to see:
-   - HTTP request span → MQTT publish span
-   - Time each operation took
-   - Any errors in the chain
+3. Search: `{ service.name = "mqtt-api" }` to find API requests
+4. Click a trace to see the full request flow:
+   - HTTP request span (pino-http logged)
+   - Request processing in Node.js
+   - MQTT publish span
+   - Overall request duration
+5. Cross-reference with Loki logs for that same time window to see detailed structured logs
 
 ---
 
 ## Part 4: Useful Queries for Your Application
 
-### Prometheus Queries
+### Prometheus Queries (Now Working)
 
-**MQTT Connection Health**:
+**Service Availability**:
 ```
-mqtt_client_connected{service_name=~"mqtt-api|mqtt-handler"} * on(instance) group_left(service_name) (1 / time())
-```
-
-**Message Processing Throughput**:
-```
-rate(mqtt_publish_sent_total[5m])
+up{job=~"api|handler"}
 ```
 
-**API Response Time P99**:
+**HTTP Request Duration (P95)**:
 ```
-histogram_quantile(0.99, rate(http_server_request_duration_seconds_bucket{service_name="mqtt-api"}[5m]))
+histogram_quantile(0.95, rate(http_request_duration_ms_bucket{job="api"}[5m]))
 ```
 
-**System Health**:
+**HTTP Request Duration (P99)**:
 ```
-{job=~"mqtt-api|mqtt-handler", __name__=~"up|process_.*"}
+histogram_quantile(0.99, rate(http_request_duration_ms_bucket{job="api"}[5m]))
+```
+
+**HTTP Request Rate** (requests per second):
+```
+rate(http_request_duration_ms_count{job=~"api|handler"}[1m])
+```
+
+**Memory Usage (RSS)**:
+```
+process_resident_memory_bytes{job=~"api|handler"}
+```
+
+**CPU Usage**:
+```
+rate(process_cpu_seconds_total{job=~"api|handler"}[1m])
+```
+
+**Heap Memory**:
+```
+nodejs_heap_size_used_bytes{job=~"api|handler"}
+```
+
+**Open File Descriptors**:
+```
+process_open_fds{job=~"api|handler"}
+```
+
+**Event Loop Lag**:
+```
+rate(nodejs_eventloop_lag_seconds{job=~"api|handler"}[1m])
+```
+
+**Garbage Collection Duration**:
+```
+rate(nodejs_gc_duration_seconds{job=~"api|handler"}[5m])
 ```
 
 ### Loki Queries
 
+**All API Request Logs**:
+```
+{job="mqtt-api"}
+```
+
+**All Handler Activity Logs**:
+```
+{job="mqtt-handler"}
+```
+
 **Failed Message Processing**:
 ```
-{job="mqtt-handler"} |= "Failed" or "error"
+{job="mqtt-handler"} | json | level="error"
 ```
 
 **Connection Issues**:
 ```
-{job=~"mqtt-api|mqtt-handler"} |= "error" |= "MQTT" or "broker"
+{job=~"mqtt-api|mqtt-handler"} |= "error" or "Failed"
 ```
 
-**All Handler Activity**:
+**MQTT Connection Events**:
 ```
-{job="mqtt-handler"}
-| json
+{job=~"mqtt-api|mqtt-handler"} |= "Connected" or "Disconnected"
+```
+
+**Message Received Events**:
+```
+{job="mqtt-handler"} |= "Message received"
+```
+
+**Response Publishing**:
+```
+{job="mqtt-handler"} |= "Publishing response"
 ```
 
 ### Tempo Queries
@@ -334,21 +514,67 @@ histogram_quantile(0.99, rate(http_server_request_duration_seconds_bucket{servic
 
 ## Part 5: Tips & Troubleshooting
 
+### No Application Metrics Appearing?
+
+**If metrics aren't showing in Prometheus after rebuild**:
+
+1. **Verify services are running**:
+   ```bash
+   docker ps | grep -E "api|handler"
+   ```
+
+2. **Check /metrics endpoints directly**:
+   ```bash
+   curl http://localhost:3000/metrics 2>/dev/null | head -10
+   curl http://localhost:3001/metrics 2>/dev/null | head -10
+   ```
+   Should return Prometheus format metrics.
+
+3. **Check Prometheus is scraping**:
+   - Go to http://localhost:9090/targets
+   - Verify `api` and `handler` targets show as "UP"
+   - If down, check service logs: `docker logs mqtt-api` and `docker logs mqtt-handler`
+
+4. **Send test traffic** (metrics need at least one request):
+   ```bash
+   curl -X POST http://localhost:3003/send \
+     -H "Content-Type: application/json" \
+     -d '{"message": "test"}'
+   ```
+
+5. **Wait 15-30 seconds** (Prometheus scrape interval is 15s)
+
 ### No Data Appearing?
 
 1. **Check services are running**:
    ```bash
-   docker ps | grep -E "prometheus|loki|tempo|mqtt"
+   docker ps | grep -E "prometheus|loki|tempo|mqtt|api|handler"
    ```
 
-2. **Check application is sending data**:
-   - For API: `curl http://localhost:3003/health`
-   - Check logs: `docker logs <container_name>`
+2. **Check application logs**:
+   ```bash
+   docker logs mqtt-api
+   docker logs mqtt-handler
+   ```
+   Look for "Connected to MQTT broker" and listen for any errors.
 
 3. **Verify endpoints**:
-   - Prometheus: `http://localhost:9090`
-   - Loki: `http://localhost:3100/loki/api/v1/query`
-   - Tempo: `http://localhost:3200/api/traces/1234` (replace with trace ID)
+   - **Prometheus**: `http://localhost:9090/api/v1/query?query=up`
+   - **Loki**: `http://localhost:3100/loki/api/v1/query?query={job="mqtt-api"}`
+   - **Tempo**: `http://localhost:3200/api/search`
+
+4. **Send test data**:
+   ```bash
+   curl -X POST http://localhost:3003/send \
+     -H "Content-Type: application/json" \
+     -d '{"message": "test"}'
+   ```
+   Then check API logs: `docker logs mqtt-api`
+
+5. **Check Prometheus metrics**:
+   - Go to Prometheus (http://localhost:9090)
+   - Query: `up{job=~"api|handler"}`
+   - Should see service status metrics
 
 ### Want to Generate Test Data?
 
@@ -357,15 +583,26 @@ Your application sends data when you:
 # Send a test message to the API
 curl -X POST http://localhost:3003/send \
   -H "Content-Type: application/json" \
-  -d '{"message": "test message"}'
+  -d '{"message": "test message from curl"}'
 ```
 
 This will generate:
-- Logs in Loki
-- Metrics in Prometheus
-- Traces in Tempo
+1. **Logs in Loki**:
+   - API: pino-http logs the POST request
+   - API: "Sending message to handler: test message from curl"
+   - Handler: pino logs "Message received from API" with the payload
+   - Handler: pino logs "Publishing response" with the response object
 
-All visible in Grafana within seconds!
+2. **Metrics in Prometheus** (current):
+   - `up` metric shows 1 for running services
+   - `process_resident_memory_bytes` and `process_cpu_seconds_total` update
+   - **After adding /metrics**: HTTP latency histograms and Node.js metrics appear
+
+3. **Traces in Tempo**:
+   - Complete trace showing HTTP request to API service
+   - Visible within seconds in Grafana
+
+All visible in Grafana within seconds after the request completes!
 
 ---
 
