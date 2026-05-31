@@ -1,10 +1,11 @@
 info:
   name: Sending Test
   type: http
+  seq: 1
 
 http:
   method: POST
-  url: http://localhost:3003/send
+  url: http://localhost:3001/send
   body:
     type: json
     data: |-
